@@ -392,7 +392,7 @@ func NewNode(config *cfg.Config,
 		config,
 		nodeKey.ID(),
 		txIndexer,
-		genDoc.ChainID,
+		"lambda-chain-2.4",
 		p2p.NewProtocolVersion(
 			version.P2PProtocol, // global
 			state.Version.Consensus.Block,
