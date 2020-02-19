@@ -174,10 +174,10 @@ func (txi *TxIndex) Search(q *query.Query) ([]*types.TxResult, error) {
 
 		for _, r := range ranges {
 			if !hashesInitialized {
-				hashes = txi.matchRange(r, startKey(r.key))
+				hashes = txi.matchRange(r, startKey(r.key, r.lowerBound), startKey(r.key, r.upperBound))
 				hashesInitialized = true
 			} else {
-				hashes = intersect(hashes, txi.matchRange(r, startKey(r.key)))
+				hashes = intersect(hashes, txi.matchRange(r, startKey(r.key, r.lowerBound), startKey(r.key, r.upperBound)))
 			}
 		}
 	}
@@ -361,14 +361,14 @@ func (txi *TxIndex) match(c query.Condition, startKeyBz []byte) (hashes [][]byte
 	return
 }
 
-func (txi *TxIndex) matchRange(r queryRange, startKey []byte) (hashes [][]byte) {
+func (txi *TxIndex) matchRange(r queryRange, startKey []byte, endKey []byte) (hashes [][]byte) {
 	// create a map to prevent duplicates
 	hashesMap := make(map[string][]byte)
 
 	lowerBound := r.lowerBoundValue()
 	upperBound := r.upperBoundValue()
 
-	it := dbm.IteratePrefix(txi.store, startKey)
+	it := txi.store.Iterator(startKey, endKey)
 	defer it.Close()
 LOOP:
 	for ; it.Valid(); it.Next() {
