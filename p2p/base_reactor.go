@@ -14,7 +14,16 @@ type Reactor interface {
 	// GetChannels returns the list of channel descriptors.
 	GetChannels() []*conn.ChannelDescriptor
 
-	// AddPeer is called by the switch when a new peer is added.
+	// InitPeer is called by the switch before the peer is started. Use it to
+	// initialize data for the peer (e.g. peer state).
+	//
+	// NOTE: The switch won't call AddPeer nor RemovePeer if it fails to start
+	// the peer. Do not store any data associated with the peer in the reactor
+	// itself unless you don't want to have a state, which is never cleaned up.
+	InitPeer(peer Peer) Peer
+
+	// AddPeer is called by the switch after the peer is added and successfully
+	// started. Use it to start goroutines communicating with the peer.
 	AddPeer(peer Peer)
 
 	// RemovePeer is called by the switch when the peer is stopped (due to error
@@ -51,3 +60,4 @@ func (*BaseReactor) GetChannels() []*conn.ChannelDescriptor        { return nil 
 func (*BaseReactor) AddPeer(peer Peer)                             {}
 func (*BaseReactor) RemovePeer(peer Peer, reason interface{})      {}
 func (*BaseReactor) Receive(chID byte, peer Peer, msgBytes []byte) {}
+func (*BaseReactor) InitPeer(peer Peer) Peer                       { return peer }
