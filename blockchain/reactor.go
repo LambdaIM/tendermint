@@ -52,6 +52,12 @@ func (e peerError) Error() string {
 	return fmt.Sprintf("error with peer %v: %s", e.peerID, e.err.Error())
 }
 
+type blockSignal int
+
+const (
+	canShutdownSig blockSignal = iota
+)
+
 // BlockchainReactor handles long-term catchup syncing.
 type BlockchainReactor struct {
 	p2p.BaseReactor
@@ -66,6 +72,7 @@ type BlockchainReactor struct {
 
 	requestsCh <-chan BlockRequest
 	errorsCh   <-chan peerError
+	shutdownCh chan blockSignal
 }
 
 // NewBlockchainReactor returns new reactor instance.
@@ -82,6 +89,8 @@ func NewBlockchainReactor(state sm.State, blockExec *sm.BlockExecutor, store *Bl
 	const capacity = 1000                      // must be bigger than peers count
 	errorsCh := make(chan peerError, capacity) // so we don't block in #Receive#pool.AddBlock
 
+	canShutdownCh := make(chan blockSignal, 1) // magic number
+
 	pool := NewBlockPool(
 		store.Height()+1,
 		requestsCh,
@@ -96,6 +105,7 @@ func NewBlockchainReactor(state sm.State, blockExec *sm.BlockExecutor, store *Bl
 		fastSync:     fastSync,
 		requestsCh:   requestsCh,
 		errorsCh:     errorsCh,
+		shutdownCh:   canShutdownCh,
 	}
 	bcR.BaseReactor = *p2p.NewBaseReactor("BlockchainReactor", bcR)
 	return bcR
@@ -121,6 +131,7 @@ func (bcR *BlockchainReactor) OnStart() error {
 
 // OnStop implements cmn.Service.
 func (bcR *BlockchainReactor) OnStop() {
+	<-bcR.shutdownCh
 	bcR.pool.Stop()
 }
 
@@ -333,6 +344,10 @@ FOR_LOOP:
 				}
 				continue FOR_LOOP
 			} else {
+				// add a sync signal to guarantee that block's tx will be totally processed
+				// TODO: may need validate this later
+				<-bcR.shutdownCh
+
 				bcR.pool.PopRequest()
 
 				// TODO: batch saves so we dont persist to disk every block
@@ -354,6 +369,9 @@ FOR_LOOP:
 						"max_peer_height", bcR.pool.MaxPeerHeight(), "blocks/s", lastRate)
 					lastHundred = time.Now()
 				}
+
+				// finish block sync, stop process could go on if called
+				bcR.shutdownCh <- canShutdownSig
 			}
 			continue FOR_LOOP
 
