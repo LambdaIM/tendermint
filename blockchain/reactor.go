@@ -90,6 +90,7 @@ func NewBlockchainReactor(state sm.State, blockExec *sm.BlockExecutor, store *Bl
 	errorsCh := make(chan peerError, capacity) // so we don't block in #Receive#pool.AddBlock
 
 	canShutdownCh := make(chan blockSignal, 1) // magic number
+	canShutdownCh <- canShutdownSig            // initial signal setup
 
 	pool := NewBlockPool(
 		store.Height()+1,
