@@ -264,7 +264,7 @@ func (r *PEXReactor) Receive(chID byte, src Peer, msgBytes []byte) {
 		} else {
 			// Check we're not receiving requests too frequently.
 			if err := r.receiveRequest(src); err != nil {
-				r.Switch.StopPeerForError(src, err)
+				//LAMBDA r.Switch.StopPeerForError(src, err)
 				return
 			}
 			r.SendAddrs(src, r.book.GetSelection())
@@ -321,7 +321,7 @@ func (r *PEXReactor) RequestAddrs(p Peer) {
 	if r.requestsSent.Has(id) {
 		return
 	}
-	r.Logger.Debug("Request addrs", "from", p)
+	r.Logger.Info("Request addrs", "from", p)
 	r.requestsSent.Set(id, struct{}{})
 	p.Send(PexChannel, cdc.MustMarshalBinaryBare(&pexRequestMessage{}))
 }
@@ -340,6 +340,8 @@ func (r *PEXReactor) ReceiveAddrs(addrs []*p2p.NetAddress, src Peer) error {
 	if err != nil {
 		return err
 	}
+
+	r.Logger.Info("Receive addrs", "addrs", addrs, "from", src)
 
 	srcIsSeed := false
 	for _, seedAddr := range r.seedAddrs {
@@ -381,7 +383,7 @@ func (r *PEXReactor) ReceiveAddrs(addrs []*p2p.NetAddress, src Peer) error {
 				err := r.dialPeer(addr)
 				if err != nil {
 					switch err.(type) {
-					case errMaxAttemptsToDial, errTooEarlyToDial:
+					case errMaxAttemptsToDial, errTooEarlyToDial, p2p.ErrCurrentlyDialingOrExistingAddress:
 						r.Logger.Debug(err.Error(), "addr", addr)
 					default:
 						r.Logger.Error(err.Error(), "addr", addr)
