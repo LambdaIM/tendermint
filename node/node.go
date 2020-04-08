@@ -107,6 +107,7 @@ func DefaultNewNode(config *cfg.Config, logger log.Logger) (*Node, error) {
 	}
 
 	return NewNode(config,
+		version.TMCoreSemVer,
 		privval.LoadOrGenFilePV(newPrivValKey, newPrivValState),
 		nodeKey,
 		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
@@ -171,7 +172,7 @@ type Node struct {
 }
 
 // NewNode returns a new, ready to go, Tendermint Node.
-func NewNode(config *cfg.Config,
+func NewNode(config *cfg.Config, softwareVer string,
 	privValidator types.PrivValidator,
 	nodeKey *p2p.NodeKey,
 	clientCreator proxy.ClientCreator,
@@ -390,6 +391,7 @@ func NewNode(config *cfg.Config,
 	p2pLogger := logger.With("module", "p2p")
 	nodeInfo, err := makeNodeInfo(
 		config,
+		softwareVer,
 		nodeKey.ID(),
 		txIndexer,
 		genDoc.ChainID,
@@ -854,6 +856,7 @@ func (n *Node) NodeInfo() p2p.NodeInfo {
 
 func makeNodeInfo(
 	config *cfg.Config,
+	softwareVer string,
 	nodeID p2p.ID,
 	txIndexer txindex.TxIndexer,
 	chainID string,
@@ -867,7 +870,7 @@ func makeNodeInfo(
 		ProtocolVersion: protocolVersion,
 		ID_:             nodeID,
 		Network:         chainID,
-		Version:         version.TMCoreSemVer,
+		Version:         softwareVer,
 		Channels: []byte{
 			bc.BlockchainChannel,
 			cs.StateChannel, cs.DataChannel, cs.VoteChannel, cs.VoteSetBitsChannel,

@@ -11,12 +11,6 @@ import (
 	"github.com/tendermint/tendermint/version"
 )
 
-// fork height
-const (
-	// TODO: change the fork height before release
-	StatePreForkHeight = 100
-)
-
 // database keys
 var (
 	stateKey    = []byte("stateKey")
