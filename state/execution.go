@@ -164,8 +164,8 @@ func (blockExec *BlockExecutor) ApplyBlock(state State, blockID types.BlockID, b
 
 	// Update the app hash and save the state.
 	state.AppHash = appHash
-	SaveState(blockExec.db, state)
 	SavePreState(blockExec.db, preState)
+	SaveState(blockExec.db, state)
 
 	fail.Fail() // XXX
 
