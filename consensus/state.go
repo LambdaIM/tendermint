@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 
@@ -608,6 +609,7 @@ func (cs *ConsensusState) receiveRoutine(maxSteps int) {
 
 	defer func() {
 		if r := recover(); r != nil {
+			cs.metrics.ConsensusFailure.With("height", strconv.Itoa(int(cs.Height))).Add(float64(1))
 			cs.Logger.Error("CONSENSUS FAILURE!!!", "err", r, "stack", string(debug.Stack()))
 			// stop gracefully
 			//

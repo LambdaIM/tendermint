@@ -19,6 +19,9 @@ type Metrics struct {
 	// Height of the chain.
 	Height metrics.Gauge
 
+	// Consensus Failure
+	ConsensusFailure metrics.Counter
+
 	// Number of rounds.
 	Rounds metrics.Gauge
 
@@ -68,6 +71,12 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Name:      "height",
 			Help:      "Height of the chain.",
 		}, labels).With(labelsAndValues...),
+		ConsensusFailure: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "consensus_failure",
+			Help:      "Consensus failure",
+		}, append(labels, "height")).With(labelsAndValues...),
 		Rounds: prometheus.NewGaugeFrom(stdprometheus.GaugeOpts{
 			Namespace: namespace,
 			Subsystem: MetricsSubsystem,
@@ -162,6 +171,8 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 func NopMetrics() *Metrics {
 	return &Metrics{
 		Height: discard.NewGauge(),
+
+		ConsensusFailure: discard.NewCounter(),
 
 		Rounds: discard.NewGauge(),
 
