@@ -17,6 +17,9 @@ const (
 type Metrics struct {
 	// Time between BeginBlock and EndBlock.
 	BlockProcessingTime metrics.Histogram
+
+	// App hash conflict error
+	AppHashConflict metrics.Counter
 }
 
 // PrometheusMetrics returns Metrics build using Prometheus client library.
@@ -35,6 +38,12 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 			Help:      "Time between BeginBlock and EndBlock in ms.",
 			Buckets:   stdprometheus.LinearBuckets(1, 10, 10),
 		}, labels).With(labelsAndValues...),
+		AppHashConflict: prometheus.NewCounterFrom(stdprometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: MetricsSubsystem,
+			Name:      "app_hash_conflict",
+			Help:      "App hash conflict error",
+		}, append(labels, "proposer", "height")).With(labelsAndValues...),
 	}
 }
 
@@ -42,5 +51,6 @@ func PrometheusMetrics(namespace string, labelsAndValues ...string) *Metrics {
 func NopMetrics() *Metrics {
 	return &Metrics{
 		BlockProcessingTime: discard.NewHistogram(),
+		AppHashConflict:     discard.NewCounter(),
 	}
 }
