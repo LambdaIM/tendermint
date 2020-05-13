@@ -1524,7 +1524,6 @@ func (cs *ConsensusState) addProposalBlockPart(msg *BlockPartMessage, peerID p2p
 // Attempt to add the vote. if its a duplicate signature, dupeout the validator
 func (cs *ConsensusState) tryAddVote(vote *types.Vote, peerID p2p.ID) (bool, error) {
 	added, err := cs.addVote(vote, peerID)
-	fmt.Println("add vote", vote, peerID)
 	if err != nil {
 		// If the vote height is off, we'll just ignore it,
 		// But if it's a conflicting sig, add it to the cs.evpool.
@@ -1535,14 +1534,12 @@ func (cs *ConsensusState) tryAddVote(vote *types.Vote, peerID p2p.ID) (bool, err
 			for _, val := range cs.delegatedPrivVals {
 				addr := val.GetPubKey().Address()
 				if bytes.Equal(vote.ValidatorAddress, addr) {
-					fmt.Println("addr", addr)
 					cs.Logger.Error("Found conflicting vote from ourselves. Did you unsafe_reset a validator?", "height", vote.Height, "round", vote.Round, "type", vote.Type)
 					return added, err
 				}
-				fmt.Println("double sign votes", voteErr.DuplicateVoteEvidence.Address(), voteErr.DuplicateVoteEvidence.String())
-				cs.evpool.AddEvidence(voteErr.DuplicateVoteEvidence)
-				return added, err
 			}
+			cs.evpool.AddEvidence(voteErr.DuplicateVoteEvidence)
+			return added, err
 		} else {
 			// Probably an invalid signature / Bad peer.
 			// Seems this can also err sometimes with "Unexpected step" - perhaps not from a bad peer ?
