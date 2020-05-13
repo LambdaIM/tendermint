@@ -233,6 +233,16 @@ func (pv *FilePV) GetPubKey() crypto.PubKey {
 	return pv.Key.PubKey
 }
 
+//GetPrivValKeyFilePath returns the path of private validator key file path
+func (pv *FilePV) GetPrivValKeyFilePath() string {
+	return pv.Key.filePath
+}
+
+//GetValStateFilePath returns the path of signature state file path
+func (pv *FilePV) GetValStateFilePath() string {
+	return pv.LastSignState.filePath
+}
+
 // SignVote signs a canonical representation of the vote, along with the
 // chainID. Implements PrivValidator.
 func (pv *FilePV) SignVote(chainID string, vote *types.Vote) error {
