@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	cmn "github.com/tendermint/tendermint/libs/common"
+	"github.com/tendermint/tendermint/libs/log"
 	"github.com/tendermint/tendermint/p2p"
 	"github.com/tendermint/tendermint/types"
 )
@@ -46,42 +47,7 @@ func TestByzantine(t *testing.T) {
 		switches[i].SetLogger(p2pLogger.With("validator", i))
 	}
 
-	blocksSubs := make([]types.Subscription, N)
-	reactors := make([]p2p.Reactor, N)
-	for i := 0; i < N; i++ {
-		// make first val byzantine
-		if i == 0 {
-			// NOTE: Now, test validators are MockPV, which by default doesn't
-			// do any safety checks.
-			css[i].privValidator.(*types.MockPV).DisableChecks()
-			css[i].decideProposal = func(j int) func(types.PrivValidator, int64, int) {
-				return func(pv types.PrivValidator, height int64, round int) {
-					byzantineDecideProposalFunc(t, height, round, css[j], switches[j])
-				}
-			}(i)
-			css[i].doPrevote = func(height int64, round int) {}
-		}
-
-		eventBus := css[i].eventBus
-		eventBus.SetLogger(logger.With("module", "events", "validator", i))
-
-		var err error
-		blocksSubs[i], err = eventBus.Subscribe(context.Background(), testSubscriber, types.EventQueryNewBlock)
-		require.NoError(t, err)
-
-		conR := NewConsensusReactor(css[i], true) // so we dont start the consensus states
-		conR.SetLogger(logger.With("validator", i))
-		conR.SetEventBus(eventBus)
-
-		var conRI p2p.Reactor = conR
-
-		// make first val byzantine
-		if i == 0 {
-			conRI = NewByzantineReactor(conR)
-		}
-
-		reactors[i] = conRI
-	}
+	reactors, blocksSubs := setupReactorAndBlockSubs(t, css, switches, N, logger)
 
 	defer func() {
 		for _, r := range reactors {
@@ -193,42 +159,7 @@ func TestByzantineMultiVal(t *testing.T) {
 		switches[i].SetLogger(p2pLogger.With("validator", i))
 	}
 
-	blocksSubs := make([]types.Subscription, nodeCount)
-	reactors := make([]p2p.Reactor, nodeCount)
-	for i := 0; i < nodeCount; i++ {
-		// make first val byzantine
-		if i == 0 {
-			// NOTE: Now, test validators are MockPV, which by default doesn't
-			// do any safety checks.
-			css[i].privValidator.(*types.MockPV).DisableChecks()
-			css[i].decideProposal = func(j int) func(types.PrivValidator, int64, int) {
-				return func(pv types.PrivValidator, height int64, round int) {
-					byzantineDecideProposalFunc(t, height, round, css[j], switches[j])
-				}
-			}(i)
-			css[i].doPrevote = func(height int64, round int) {}
-		}
-
-		eventBus := css[i].eventBus
-		eventBus.SetLogger(logger.With("module", "events", "validator", i))
-
-		var err error
-		blocksSubs[i], err = eventBus.Subscribe(context.Background(), testSubscriber, types.EventQueryNewBlock)
-		require.NoError(t, err)
-
-		conR := NewConsensusReactor(css[i], true) // so we dont start the consensus states
-		conR.SetLogger(logger.With("validator", i))
-		conR.SetEventBus(eventBus)
-
-		var conRI p2p.Reactor = conR
-
-		// make first val byzantine
-		if i == 0 {
-			conRI = NewByzantineReactor(conR)
-		}
-
-		reactors[i] = conRI
-	}
+	reactors, blocksSubs := setupReactorAndBlockSubs(t, css, switches, nodeCount, logger)
 
 	defer func() {
 		for _, r := range reactors {
@@ -340,42 +271,7 @@ func TestByzantineTwoNodes(t *testing.T) {
 		switches[i].SetLogger(p2pLogger.With("validator", i))
 	}
 
-	blocksSubs := make([]types.Subscription, nodeCount)
-	reactors := make([]p2p.Reactor, nodeCount)
-	for i := 0; i < nodeCount; i++ {
-		// make first val byzantine
-		if i == 0 {
-			// NOTE: Now, test validators are MockPV, which by default doesn't
-			// do any safety checks.
-			css[i].privValidator.(*types.MockPV).DisableChecks()
-			css[i].decideProposal = func(j int) func(types.PrivValidator, int64, int) {
-				return func(pv types.PrivValidator, height int64, round int) {
-					byzantineDecideProposalFunc(t, height, round, css[j], switches[j])
-				}
-			}(i)
-			css[i].doPrevote = func(height int64, round int) {}
-		}
-
-		eventBus := css[i].eventBus
-		eventBus.SetLogger(logger.With("module", "events", "validator", i))
-
-		var err error
-		blocksSubs[i], err = eventBus.Subscribe(context.Background(), testSubscriber, types.EventQueryNewBlock)
-		require.NoError(t, err)
-
-		conR := NewConsensusReactor(css[i], true) // so we dont start the consensus states
-		conR.SetLogger(logger.With("validator", i))
-		conR.SetEventBus(eventBus)
-
-		var conRI p2p.Reactor = conR
-
-		// make first val byzantine
-		if i == 0 {
-			conRI = NewByzantineReactor(conR)
-		}
-
-		reactors[i] = conRI
-	}
+	reactors, blocksSubs := setupReactorAndBlockSubs(t, css, switches, nodeCount, logger)
 
 	defer func() {
 		for _, r := range reactors {
@@ -504,6 +400,47 @@ func sendProposalAndParts(val types.PrivValidator, height int64, round int, cs *
 
 	peer.Send(VoteChannel, cdc.MustMarshalBinaryBare(&VoteMessage{prevote}))
 	peer.Send(VoteChannel, cdc.MustMarshalBinaryBare(&VoteMessage{precommit}))
+}
+
+func setupReactorAndBlockSubs(t *testing.T, css []*ConsensusState, switches []*p2p.Switch, count int, logger log.Logger) ([]p2p.Reactor, []types.Subscription) {
+	blocksSubs := make([]types.Subscription, count)
+	reactors := make([]p2p.Reactor, count)
+	for i := 0; i < count; i++ {
+		// make first val byzantine
+		if i == 0 {
+			// NOTE: Now, test validators are MockPV, which by default doesn't
+			// do any safety checks.
+			css[i].privValidator.(*types.MockPV).DisableChecks()
+			css[i].decideProposal = func(j int) func(types.PrivValidator, int64, int) {
+				return func(pv types.PrivValidator, height int64, round int) {
+					byzantineDecideProposalFunc(t, height, round, css[j], switches[j])
+				}
+			}(i)
+			css[i].doPrevote = func(height int64, round int) {}
+		}
+
+		eventBus := css[i].eventBus
+		eventBus.SetLogger(logger.With("module", "events", "validator", i))
+
+		var err error
+		blocksSubs[i], err = eventBus.Subscribe(context.Background(), testSubscriber, types.EventQueryNewBlock)
+		require.NoError(t, err)
+
+		conR := NewConsensusReactor(css[i], true) // so we dont start the consensus states
+		conR.SetLogger(logger.With("validator", i))
+		conR.SetEventBus(eventBus)
+
+		var conRI p2p.Reactor = conR
+
+		// make first val byzantine
+		if i == 0 {
+			conRI = NewByzantineReactor(conR)
+		}
+
+		reactors[i] = conRI
+	}
+
+	return reactors, blocksSubs
 }
 
 //----------------------------------------
