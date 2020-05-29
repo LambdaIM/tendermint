@@ -16,14 +16,14 @@ var _ Client = (*localClient)(nil)
 type localClient struct {
 	cmn.BaseService
 
-	mtx *sync.Mutex
+	mtx *sync.RWMutex
 	types.Application
 	Callback
 }
 
-func NewLocalClient(mtx *sync.Mutex, app types.Application) *localClient {
+func NewLocalClient(mtx *sync.RWMutex, app types.Application) *localClient {
 	if mtx == nil {
-		mtx = new(sync.Mutex)
+		mtx = new(sync.RWMutex)
 	}
 	cli := &localClient{
 		mtx:         mtx,
@@ -201,8 +201,8 @@ func (app *localClient) CheckTxSync(tx []byte) (*types.ResponseCheckTx, error) {
 }
 
 func (app *localClient) QuerySync(req types.RequestQuery) (*types.ResponseQuery, error) {
-	app.mtx.Lock()
-	defer app.mtx.Unlock()
+	app.mtx.RLock()
+	defer app.mtx.RUnlock()
 
 	res := app.Application.Query(req)
 	return &res, nil
