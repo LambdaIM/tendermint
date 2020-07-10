@@ -79,6 +79,9 @@ type ConsensusState struct {
 	config        *cfg.ConsensusConfig
 	privValidator types.PrivValidator // for signing votes
 
+	multiValMode      bool
+	delegatedPrivVals []types.PrivValidator //for multi consensus private keys
+
 	// store blocks and commits
 	blockStore sm.BlockStore
 
@@ -95,7 +98,8 @@ type ConsensusState struct {
 	// internal state
 	mtx sync.RWMutex
 	cstypes.RoundState
-	state sm.State // State until height-1.
+
+	state sm.State // State until height-1. It will keep synchronized by multi vals
 
 	// state changes may be triggered by: msgs from peers,
 	// msgs from ourself, or by timeouts
@@ -121,7 +125,7 @@ type ConsensusState struct {
 	nSteps int
 
 	// some functions can be overwritten for testing
-	decideProposal func(height int64, round int)
+	decideProposal func(proposer types.PrivValidator, height int64, round int)
 	doPrevote      func(height int64, round int)
 	setProposal    func(proposal *types.Proposal) error
 
@@ -150,20 +154,22 @@ func NewConsensusState(
 	options ...StateOption,
 ) *ConsensusState {
 	cs := &ConsensusState{
-		config:           config,
-		blockExec:        blockExec,
-		blockStore:       blockStore,
-		txNotifier:       txNotifier,
-		peerMsgQueue:     make(chan msgInfo, msgQueueSize),
-		internalMsgQueue: make(chan msgInfo, msgQueueSize),
-		timeoutTicker:    NewTimeoutTicker(),
-		statsMsgQueue:    make(chan msgInfo, msgQueueSize),
-		done:             make(chan struct{}),
-		doWALCatchup:     true,
-		wal:              nilWAL{},
-		evpool:           evpool,
-		evsw:             tmevents.NewEventSwitch(),
-		metrics:          NopMetrics(),
+		config:            config,
+		blockExec:         blockExec,
+		blockStore:        blockStore,
+		multiValMode:      false,
+		delegatedPrivVals: make([]types.PrivValidator, 0),
+		txNotifier:        txNotifier,
+		peerMsgQueue:      make(chan msgInfo, msgQueueSize),
+		internalMsgQueue:  make(chan msgInfo, msgQueueSize),
+		timeoutTicker:     NewTimeoutTicker(),
+		statsMsgQueue:     make(chan msgInfo, msgQueueSize),
+		done:              make(chan struct{}),
+		doWALCatchup:      true,
+		wal:               nilWAL{},
+		evpool:            evpool,
+		evsw:              tmevents.NewEventSwitch(),
+		metrics:           NopMetrics(),
 	}
 	// set function defaults (may be overwritten before calling Start)
 	cs.decideProposal = cs.defaultDecideProposal
@@ -256,6 +262,18 @@ func (cs *ConsensusState) GetValidators() (int64, []*types.Validator) {
 func (cs *ConsensusState) SetPrivValidator(priv types.PrivValidator) {
 	cs.mtx.Lock()
 	cs.privValidator = priv
+	cs.delegatedPrivVals = append(cs.delegatedPrivVals, priv)
+	cs.mtx.Unlock()
+}
+
+//SetDelegatedPrivValidators set delegated private validators
+func (cs *ConsensusState) SetDelegatedPrivValidators(delVals []types.PrivValidator) {
+	cs.mtx.Lock()
+	cs.multiValMode = true
+	cs.delegatedPrivVals = delVals
+	if cs.privValidator != nil {
+		cs.delegatedPrivVals = append(cs.delegatedPrivVals, cs.privValidator)
+	}
 	cs.mtx.Unlock()
 }
 
@@ -877,25 +895,17 @@ func (cs *ConsensusState) enterPropose(height int64, round int) {
 	// If we don't get the proposal and all block parts quick enough, enterPrevote
 	cs.scheduleTimeout(cs.config.Propose(round), height, round, cstypes.RoundStepPropose)
 
-	// Nothing more to do if we're not a validator
-	if cs.privValidator == nil {
-		logger.Debug("This node is not a validator")
+	vals, proposer := cs.getValidatorsAndProposer()
+	if len(vals) == 0 {
+		logger.Debug("This node does not have validator", "vals", cs.Validators)
 		return
 	}
 
-	// if not a validator, we're done
-	address := cs.privValidator.GetPubKey().Address()
-	if !cs.Validators.HasAddress(address) {
-		logger.Debug("This node is not a validator", "addr", address, "vals", cs.Validators)
-		return
-	}
-	logger.Debug("This node is a validator")
-
-	if cs.isProposer(address) {
-		logger.Info("enterPropose: Our turn to propose", "proposer", cs.Validators.GetProposer().Address, "privValidator", cs.privValidator)
-		cs.decideProposal(height, round)
+	if proposer != nil {
+		logger.Info("enterPropose: Our turn to propose", "proposer", cs.Validators.GetProposer().Address, "privValidator", proposer)
+		cs.decideProposal(proposer, height, round)
 	} else {
-		logger.Info("enterPropose: Not our turn to propose", "proposer", cs.Validators.GetProposer().Address, "privValidator", cs.privValidator)
+		logger.Info("enterPropose: Not our turn to propose", "proposer", cs.Validators.GetProposer().Address)
 	}
 }
 
@@ -903,7 +913,7 @@ func (cs *ConsensusState) isProposer(address []byte) bool {
 	return bytes.Equal(cs.Validators.GetProposer().Address, address)
 }
 
-func (cs *ConsensusState) defaultDecideProposal(height int64, round int) {
+func (cs *ConsensusState) defaultDecideProposal(proposer types.PrivValidator, height int64, round int) {
 	var block *types.Block
 	var blockParts *types.PartSet
 
@@ -923,9 +933,9 @@ func (cs *ConsensusState) defaultDecideProposal(height int64, round int) {
 	cs.wal.FlushAndSync()
 
 	// Make proposal
-	propBlockId := types.BlockID{Hash: block.Hash(), PartsHeader: blockParts.Header()}
-	proposal := types.NewProposal(height, round, cs.ValidRound, propBlockId)
-	if err := cs.privValidator.SignProposal(cs.state.ChainID, proposal); err == nil {
+	propBlockID := types.BlockID{Hash: block.Hash(), PartsHeader: blockParts.Header()}
+	proposal := types.NewProposal(height, round, cs.ValidRound, propBlockID)
+	if err := proposer.SignProposal(cs.state.ChainID, proposal); err == nil {
 
 		// send proposal and block parts on internal msg queue
 		cs.sendInternalMessage(msgInfo{&ProposalMessage{proposal}, ""})
@@ -978,8 +988,8 @@ func (cs *ConsensusState) createProposalBlock() (block *types.Block, blockParts 
 		return
 	}
 
-	proposerAddr := cs.privValidator.GetPubKey().Address()
-	return cs.blockExec.CreateProposalBlock(cs.Height, cs.state, commit, proposerAddr)
+	_, proposer := cs.getValidatorsAndProposer()
+	return cs.blockExec.CreateProposalBlock(cs.Height, cs.state, commit, proposer.GetPubKey().Address())
 }
 
 // Enter: `timeoutPropose` after entering Propose.
@@ -1521,10 +1531,12 @@ func (cs *ConsensusState) tryAddVote(vote *types.Vote, peerID p2p.ID) (bool, err
 		if err == ErrVoteHeightMismatch {
 			return added, err
 		} else if voteErr, ok := err.(*types.ErrVoteConflictingVotes); ok {
-			addr := cs.privValidator.GetPubKey().Address()
-			if bytes.Equal(vote.ValidatorAddress, addr) {
-				cs.Logger.Error("Found conflicting vote from ourselves. Did you unsafe_reset a validator?", "height", vote.Height, "round", vote.Round, "type", vote.Type)
-				return added, err
+			for _, val := range cs.delegatedPrivVals {
+				addr := val.GetPubKey().Address()
+				if bytes.Equal(vote.ValidatorAddress, addr) {
+					cs.Logger.Error("Found conflicting vote from ourselves. Did you unsafe_reset a validator?", "height", vote.Height, "round", vote.Round, "type", vote.Type)
+					return added, err
+				}
 			}
 			cs.evpool.AddEvidence(voteErr.DuplicateVoteEvidence)
 			return added, err
@@ -1686,11 +1698,11 @@ func (cs *ConsensusState) addVote(vote *types.Vote, peerID p2p.ID) (added bool, 
 	return
 }
 
-func (cs *ConsensusState) signVote(type_ types.SignedMsgType, hash []byte, header types.PartSetHeader) (*types.Vote, error) {
+func (cs *ConsensusState) signVote(privValidator types.PrivValidator, type_ types.SignedMsgType, hash []byte, header types.PartSetHeader) (*types.Vote, error) {
 	// Flush the WAL. Otherwise, we may not recompute the same vote to sign, and the privValidator will refuse to sign anything.
 	cs.wal.FlushAndSync()
 
-	addr := cs.privValidator.GetPubKey().Address()
+	addr := privValidator.GetPubKey().Address()
 	valIndex, _ := cs.Validators.GetByAddress(addr)
 
 	vote := &types.Vote{
@@ -1702,7 +1714,7 @@ func (cs *ConsensusState) signVote(type_ types.SignedMsgType, hash []byte, heade
 		Type:             type_,
 		BlockID:          types.BlockID{Hash: hash, PartsHeader: header},
 	}
-	err := cs.privValidator.SignVote(cs.state.ChainID, vote)
+	err := privValidator.SignVote(cs.state.ChainID, vote)
 	return vote, err
 }
 
@@ -1726,21 +1738,44 @@ func (cs *ConsensusState) voteTime() time.Time {
 }
 
 // sign the vote and publish on internalMsgQueue
-func (cs *ConsensusState) signAddVote(type_ types.SignedMsgType, hash []byte, header types.PartSetHeader) *types.Vote {
+func (cs *ConsensusState) signAddVote(type_ types.SignedMsgType, hash []byte, header types.PartSetHeader) {
 	// if we don't have a key or we're not in the validator set, do nothing
-	if cs.privValidator == nil || !cs.Validators.HasAddress(cs.privValidator.GetPubKey().Address()) {
-		return nil
+	validators, _ := cs.getValidatorsAndProposer()
+	if len(validators) == 0 {
+		cs.Logger.Info("no voter for this node", "height", cs.Height, "round", cs.Round)
+		return
 	}
-	vote, err := cs.signVote(type_, hash, header)
-	if err == nil {
-		cs.sendInternalMessage(msgInfo{&VoteMessage{vote}, ""})
-		cs.Logger.Info("Signed and pushed vote", "height", cs.Height, "round", cs.Round, "vote", vote, "err", err)
-		return vote
+
+	for _, val := range validators {
+		vote, err := cs.signVote(val, type_, hash, header)
+		if err == nil {
+			cs.sendInternalMessage(msgInfo{&VoteMessage{vote}, ""})
+			cs.Logger.Info("Signed and pushed vote", "height", cs.Height, "round", cs.Round, "vote", vote, "err", err)
+		} else {
+			cs.Logger.Error("Error signing vote", "height", cs.Height, "round", cs.Round, "vote", vote, "err", err)
+		}
 	}
-	//if !cs.replayMode {
-	cs.Logger.Error("Error signing vote", "height", cs.Height, "round", cs.Round, "vote", vote, "err", err)
-	//}
-	return nil
+}
+
+//get validators and proposer's priValidator for current state
+func (cs *ConsensusState) getValidatorsAndProposer() ([]types.PrivValidator, types.PrivValidator) {
+	if len(cs.delegatedPrivVals) == 0 {
+		return cs.delegatedPrivVals, nil
+	}
+
+	validators := make([]types.PrivValidator, 0)
+	var proposer types.PrivValidator
+	for _, privVal := range cs.delegatedPrivVals {
+		addr := privVal.GetPubKey().Address()
+		if cs.Validators.HasAddress(addr) {
+			validators = append(validators, privVal)
+			if cs.isProposer(addr) {
+				proposer = privVal
+			}
+		}
+	}
+
+	return validators, proposer
 }
 
 //---------------------------------------------------------

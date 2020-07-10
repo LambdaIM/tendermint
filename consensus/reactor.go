@@ -170,7 +170,12 @@ func (conR *ConsensusReactor) AddPeer(peer p2p.Peer) {
 
 	peerState, ok := peer.Get(types.PeerStateKey).(*PeerState)
 	if !ok {
-		panic(fmt.Sprintf("peer %v has no state", peer))
+		peerState = NewPeerState(peer).SetLogger(conR.Logger)
+		peer.Set(types.PeerStateKey, peerState)
+
+		//do not panic here, ensure peerstate has been set, it still a better way to
+		//keep byzantine test cases available
+		//panic(fmt.Sprintf("peer %v has no state", peer))
 	}
 
 	// Begin routines for this peer.

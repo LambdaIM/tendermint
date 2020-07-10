@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	cmn "github.com/tendermint/tendermint/libs/common"
+	"github.com/tendermint/tendermint/libs/log"
 	"github.com/tendermint/tendermint/p2p"
 	"github.com/tendermint/tendermint/types"
 )
@@ -46,42 +47,7 @@ func TestByzantine(t *testing.T) {
 		switches[i].SetLogger(p2pLogger.With("validator", i))
 	}
 
-	blocksSubs := make([]types.Subscription, N)
-	reactors := make([]p2p.Reactor, N)
-	for i := 0; i < N; i++ {
-		// make first val byzantine
-		if i == 0 {
-			// NOTE: Now, test validators are MockPV, which by default doesn't
-			// do any safety checks.
-			css[i].privValidator.(*types.MockPV).DisableChecks()
-			css[i].decideProposal = func(j int) func(int64, int) {
-				return func(height int64, round int) {
-					byzantineDecideProposalFunc(t, height, round, css[j], switches[j])
-				}
-			}(i)
-			css[i].doPrevote = func(height int64, round int) {}
-		}
-
-		eventBus := css[i].eventBus
-		eventBus.SetLogger(logger.With("module", "events", "validator", i))
-
-		var err error
-		blocksSubs[i], err = eventBus.Subscribe(context.Background(), testSubscriber, types.EventQueryNewBlock)
-		require.NoError(t, err)
-
-		conR := NewConsensusReactor(css[i], true) // so we dont start the consensus states
-		conR.SetLogger(logger.With("validator", i))
-		conR.SetEventBus(eventBus)
-
-		var conRI p2p.Reactor = conR
-
-		// make first val byzantine
-		if i == 0 {
-			conRI = NewByzantineReactor(conR)
-		}
-
-		reactors[i] = conRI
-	}
+	reactors, blocksSubs := setupReactorAndBlockSubs(t, css, switches, N, logger)
 
 	defer func() {
 		for _, r := range reactors {
@@ -166,6 +132,208 @@ func TestByzantine(t *testing.T) {
 	}
 }
 
+//TestByzantineMultiVal runs byzantine nodes in multi validator mode. Node a runs with 3 validators and other nodes run with
+//1 validator. To ensure byzantine process works in expected sequence
+func TestByzantineMultiVal(t *testing.T) {
+	N := 7
+	M := 3
+	logger := consensusLogger().With("test", "byzantine")
+	nodeCount, css, cleanup := randConsensusNetMultiValMode(N, M, "consensus_byzantine_test", newMockTickerFunc(false), newCounter)
+	defer cleanup()
+
+	// give the byzantine validator a normal ticker
+	ticker := NewTimeoutTicker()
+	ticker.SetLogger(css[0].Logger)
+	css[0].SetTimeoutTicker(ticker)
+
+	switches := make([]*p2p.Switch, nodeCount)
+	p2pLogger := logger.With("module", "p2p")
+	for i := 0; i < nodeCount; i++ {
+		switches[i] = p2p.MakeSwitch(
+			config.P2P,
+			i,
+			"foo", "1.0.0",
+			func(i int, sw *p2p.Switch) *p2p.Switch {
+				return sw
+			})
+		switches[i].SetLogger(p2pLogger.With("validator", i))
+	}
+
+	reactors, blocksSubs := setupReactorAndBlockSubs(t, css, switches, nodeCount, logger)
+
+	defer func() {
+		for _, r := range reactors {
+			if rr, ok := r.(*ByzantineReactor); ok {
+				rr.reactor.Switch.Stop()
+			} else {
+				r.(*ConsensusReactor).Switch.Stop()
+			}
+		}
+	}()
+
+	p2p.MakeConnectedSwitches(config.P2P, nodeCount, func(i int, s *p2p.Switch) *p2p.Switch {
+		// ignore new switch s, we already made ours
+		switches[i].AddReactor("CONSENSUS", reactors[i])
+		return switches[i]
+	}, func(sws []*p2p.Switch, i, j int) {
+		// the network starts partitioned with globally active adversary
+		if i != 0 {
+			return
+		}
+		p2p.Connect2Switches(sws, i, j)
+	})
+
+	// start the non-byz state machines.
+	// note these must be started before the byz
+	for i := 1; i < nodeCount; i++ {
+		cr := reactors[i].(*ConsensusReactor)
+		cr.SwitchToConsensus(cr.conS.GetState(), 0)
+	}
+
+	// start the byzantine state machine
+	byzR := reactors[0].(*ByzantineReactor)
+	s := byzR.reactor.conS.GetState()
+	byzR.reactor.SwitchToConsensus(s, 0)
+
+	// byz proposer sends one block to peers[0]
+	// and the other block to peers[1] and peers[2].
+	// note peers and switches order don't match.
+	peers := switches[0].Peers().List()
+
+	// partition A
+	ind0 := getSwitchIndex(switches, peers[0])
+
+	// partition B
+	ind1 := getSwitchIndex(switches, peers[1])
+	ind2 := getSwitchIndex(switches, peers[2])
+	p2p.Connect2Switches(switches, ind1, ind2)
+
+	// wait for someone in the big partition (B) to make a block
+	<-blocksSubs[ind2].Out()
+
+	t.Log("A block has been committed. Healing partition")
+	p2p.Connect2Switches(switches, ind0, ind1)
+	p2p.Connect2Switches(switches, ind0, ind2)
+
+	// wait till everyone makes the first new block
+	// (one of them already has)
+	wg := new(sync.WaitGroup)
+	wg.Add(2)
+	for i := 1; i < nodeCount-1; i++ {
+		go func(j int) {
+			<-blocksSubs[j].Out()
+			wg.Done()
+		}(i)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	tick := time.NewTicker(time.Second * 10)
+	select {
+	case <-done:
+	case <-tick.C:
+		for i, reactor := range reactors {
+			t.Log(fmt.Sprintf("Consensus Reactor %v", i))
+			t.Log(fmt.Sprintf("%v", reactor))
+		}
+		t.Fatalf("Timed out waiting for all validators to commit first block")
+	}
+}
+
+//TestByzantineTwoNodes is not a typical byzantine mode, it runs with 4 validators but only 2 nodes
+//it simulates a non-typical byzantine case
+func TestByzantineTwoNodes(t *testing.T) {
+	N := 4
+	M := 3
+	logger := consensusLogger().With("test", "byzantine")
+	nodeCount, css, cleanup := randConsensusNetMultiValMode(N, M, "consensus_byzantine_test", newMockTickerFunc(false), newCounter)
+	defer cleanup()
+
+	// give the byzantine validator a normal ticker
+	ticker := NewTimeoutTicker()
+	ticker.SetLogger(css[0].Logger)
+	css[0].SetTimeoutTicker(ticker)
+
+	switches := make([]*p2p.Switch, nodeCount)
+	p2pLogger := logger.With("module", "p2p")
+	for i := 0; i < nodeCount; i++ {
+		switches[i] = p2p.MakeSwitch(
+			config.P2P,
+			i,
+			"foo", "1.0.0",
+			func(i int, sw *p2p.Switch) *p2p.Switch {
+				return sw
+			})
+		switches[i].SetLogger(p2pLogger.With("validator", i))
+	}
+
+	reactors, blocksSubs := setupReactorAndBlockSubs(t, css, switches, nodeCount, logger)
+
+	defer func() {
+		for _, r := range reactors {
+			if rr, ok := r.(*ByzantineReactor); ok {
+				rr.reactor.Switch.Stop()
+			} else {
+				r.(*ConsensusReactor).Switch.Stop()
+			}
+		}
+	}()
+
+	p2p.MakeConnectedSwitches(config.P2P, nodeCount, func(i int, s *p2p.Switch) *p2p.Switch {
+		// ignore new switch s, we already made ours
+		switches[i].AddReactor("CONSENSUS", reactors[i])
+		return switches[i]
+	}, func(sws []*p2p.Switch, i, j int) {
+		// the network starts partitioned with globally active adversary
+		if i != 0 {
+			return
+		}
+		p2p.Connect2Switches(sws, i, j)
+	})
+
+	// start the non-byz state machines.
+	// note these must be started before the byz
+	for i := 1; i < nodeCount; i++ {
+		cr := reactors[i].(*ConsensusReactor)
+		cr.SwitchToConsensus(cr.conS.GetState(), 0)
+	}
+
+	// start the byzantine state machine
+	byzR := reactors[0].(*ByzantineReactor)
+	s := byzR.reactor.conS.GetState()
+	byzR.reactor.SwitchToConsensus(s, 0)
+
+	wg := new(sync.WaitGroup)
+	wg.Add(nodeCount)
+	for i := 0; i < nodeCount; i++ {
+		go func(j int) {
+			<-blocksSubs[j].Out()
+			wg.Done()
+		}(i)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	tick := time.NewTicker(time.Second * 10)
+	select {
+	case <-done:
+	case <-tick.C:
+		for i, reactor := range reactors {
+			t.Log(fmt.Sprintf("Consensus Reactor %v", i))
+			t.Log(fmt.Sprintf("%v", reactor))
+		}
+		t.Fatalf("Timed out waiting for all validators to commit first block")
+	}
+}
+
 //-------------------------------
 // byzantine consensus functions
 
@@ -197,14 +365,18 @@ func byzantineDecideProposalFunc(t *testing.T, height int64, round int, cs *Cons
 	t.Logf("Byzantine: broadcasting conflicting proposals to %d peers", len(peers))
 	for i, peer := range peers {
 		if i < len(peers)/2 {
-			go sendProposalAndParts(height, round, cs, peer, proposal1, block1Hash, blockParts1)
+			for _, val := range cs.delegatedPrivVals {
+				go sendProposalAndParts(val, height, round, cs, peer, proposal1, block1Hash, blockParts1)
+			}
 		} else {
-			go sendProposalAndParts(height, round, cs, peer, proposal2, block2Hash, blockParts2)
+			for _, val := range cs.delegatedPrivVals {
+				go sendProposalAndParts(val, height, round, cs, peer, proposal2, block2Hash, blockParts2)
+			}
 		}
 	}
 }
 
-func sendProposalAndParts(height int64, round int, cs *ConsensusState, peer p2p.Peer, proposal *types.Proposal, blockHash []byte, parts *types.PartSet) {
+func sendProposalAndParts(val types.PrivValidator, height int64, round int, cs *ConsensusState, peer p2p.Peer, proposal *types.Proposal, blockHash []byte, parts *types.PartSet) {
 	// proposal
 	msg := &ProposalMessage{Proposal: proposal}
 	peer.Send(DataChannel, cdc.MustMarshalBinaryBare(msg))
@@ -222,12 +394,53 @@ func sendProposalAndParts(height int64, round int, cs *ConsensusState, peer p2p.
 
 	// votes
 	cs.mtx.Lock()
-	prevote, _ := cs.signVote(types.PrevoteType, blockHash, parts.Header())
-	precommit, _ := cs.signVote(types.PrecommitType, blockHash, parts.Header())
+	prevote, _ := cs.signVote(val, types.PrevoteType, blockHash, parts.Header())
+	precommit, _ := cs.signVote(val, types.PrecommitType, blockHash, parts.Header())
 	cs.mtx.Unlock()
 
 	peer.Send(VoteChannel, cdc.MustMarshalBinaryBare(&VoteMessage{prevote}))
 	peer.Send(VoteChannel, cdc.MustMarshalBinaryBare(&VoteMessage{precommit}))
+}
+
+func setupReactorAndBlockSubs(t *testing.T, css []*ConsensusState, switches []*p2p.Switch, count int, logger log.Logger) ([]p2p.Reactor, []types.Subscription) {
+	blocksSubs := make([]types.Subscription, count)
+	reactors := make([]p2p.Reactor, count)
+	for i := 0; i < count; i++ {
+		// make first val byzantine
+		if i == 0 {
+			// NOTE: Now, test validators are MockPV, which by default doesn't
+			// do any safety checks.
+			css[i].privValidator.(*types.MockPV).DisableChecks()
+			css[i].decideProposal = func(j int) func(types.PrivValidator, int64, int) {
+				return func(pv types.PrivValidator, height int64, round int) {
+					byzantineDecideProposalFunc(t, height, round, css[j], switches[j])
+				}
+			}(i)
+			css[i].doPrevote = func(height int64, round int) {}
+		}
+
+		eventBus := css[i].eventBus
+		eventBus.SetLogger(logger.With("module", "events", "validator", i))
+
+		var err error
+		blocksSubs[i], err = eventBus.Subscribe(context.Background(), testSubscriber, types.EventQueryNewBlock)
+		require.NoError(t, err)
+
+		conR := NewConsensusReactor(css[i], true) // so we dont start the consensus states
+		conR.SetLogger(logger.With("validator", i))
+		conR.SetEventBus(eventBus)
+
+		var conRI p2p.Reactor = conR
+
+		// make first val byzantine
+		if i == 0 {
+			conRI = NewByzantineReactor(conR)
+		}
+
+		reactors[i] = conRI
+	}
+
+	return reactors, blocksSubs
 }
 
 //----------------------------------------

@@ -1,7 +1,6 @@
 package node
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -109,6 +108,8 @@ func DefaultNewNode(config *cfg.Config, logger log.Logger) (*Node, error) {
 	return NewNode(config,
 		version.TMCoreSemVer,
 		privval.LoadOrGenFilePV(newPrivValKey, newPrivValState),
+		false,
+		nil,
 		nodeKey,
 		proxy.DefaultClientCreator(config.ProxyApp, config.ABCI, config.DBDir()),
 		DefaultGenesisDocProviderFunc(config),
@@ -146,6 +147,7 @@ type Node struct {
 	config        *cfg.Config
 	genesisDoc    *types.GenesisDoc   // initial validator set
 	privValidator types.PrivValidator // local node's validator key
+	multiValMode  bool
 
 	// network
 	transport   *p2p.MultiplexTransport
@@ -174,6 +176,8 @@ type Node struct {
 // NewNode returns a new, ready to go, Tendermint Node.
 func NewNode(config *cfg.Config, softwareVer string,
 	privValidator types.PrivValidator,
+	isMultiValMode bool,
+	pvs []*privval.FilePV,
 	nodeKey *p2p.NodeKey,
 	clientCreator proxy.ClientCreator,
 	genesisDocProvider GenesisDocProvider,
@@ -301,12 +305,24 @@ func NewNode(config *cfg.Config, softwareVer string,
 	// Decide whether to fast-sync or not
 	// We don't fast-sync when the only validator is us.
 	fastSync := config.FastSync
-	if state.Validators.Size() == 1 {
-		addr, _ := state.Validators.GetByIndex(0)
-		privValAddr := privValidator.GetPubKey().Address()
-		if bytes.Equal(privValAddr, addr) {
+	stateValSize := state.Validators.Size()
+	valSize := 0
+	if stateValSize > 0 {
+		if state.Validators.HasAddress(privValidator.GetPubKey().Address()) {
+			valSize++
+		}
+
+		for _, val := range pvs {
+			if state.Validators.HasAddress(val.GetPubKey().Address()) {
+				valSize++
+			}
+		}
+
+		if valSize == stateValSize {
 			fastSync = false
 		}
+	} else {
+		return nil, errors.New("no validators for current chain")
 	}
 
 	pubKey := privValidator.GetPubKey()
@@ -380,6 +396,22 @@ func NewNode(config *cfg.Config, softwareVer string,
 	consensusState.SetLogger(consensusLogger)
 	if privValidator != nil {
 		consensusState.SetPrivValidator(privValidator)
+	}
+
+	if isMultiValMode && len(pvs) > 0 {
+		delVals := make([]types.PrivValidator, len(pvs))
+		for i := range pvs {
+			delVals[i] = pvs[i]
+
+			pubKey := delVals[i].GetPubKey()
+			addr := pubKey.Address()
+			if state.Validators.HasAddress(addr) {
+				consensusLogger.Info("This node has a delegated validator", "addr", addr, "pubKey", pubKey)
+			} else {
+				consensusLogger.Info("This node has a delegated non-validator", "addr", addr, "pubKey", pubKey)
+			}
+		}
+		consensusState.SetDelegatedPrivValidators(delVals)
 	}
 	consensusReactor := cs.NewConsensusReactor(consensusState, fastSync, cs.ReactorMetrics(csMetrics))
 	consensusReactor.SetLogger(consensusLogger)
@@ -525,6 +557,7 @@ func NewNode(config *cfg.Config, softwareVer string,
 		config:        config,
 		genesisDoc:    genDoc,
 		privValidator: privValidator,
+		multiValMode:  isMultiValMode,
 
 		transport: transport,
 		sw:        sw,
@@ -820,6 +853,11 @@ func (n *Node) EventBus() *types.EventBus {
 // XXX: for convenience only!
 func (n *Node) PrivValidator() types.PrivValidator {
 	return n.privValidator
+}
+
+//MultiValMode returns if the node runs on multi-validator mode
+func (n *Node) MultiValMode() bool {
+	return n.multiValMode
 }
 
 // GenesisDoc returns the Node's GenesisDoc.
