@@ -43,7 +43,7 @@ var (
 
 	// BlockProtocol versions all block data structures and processing.
 	// This includes validity of blocks and state updates.
-	BlockProtocol Protocol = 10
+	BlockProtocol Protocol = 11
 )
 
 //------------------------------------------------------------------------
