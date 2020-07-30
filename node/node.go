@@ -397,7 +397,7 @@ func NewNode(config *cfg.Config, softwareVer string,
 		genDoc.ChainID,
 		p2p.NewProtocolVersion(
 			version.P2PProtocol, // global
-			version.BlockProtocol,
+			version.BlockProtocolV1,
 			state.Version.Consensus.App,
 		),
 	)
