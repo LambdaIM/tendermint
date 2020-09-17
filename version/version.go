@@ -46,6 +46,7 @@ var (
 	BlockProtocol Protocol = 10
 	//BlockProtocolV1 update version to 11
 	BlockProtocolV1 Protocol = 11
+	BlockProtocolV2 Protocol = 12
 )
 
 //------------------------------------------------------------------------
