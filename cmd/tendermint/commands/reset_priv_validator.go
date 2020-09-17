@@ -38,6 +38,23 @@ func resetPrivValidator(cmd *cobra.Command, args []string) {
 	resetFilePV(config.PrivValidatorKeyFile(), config.PrivValidatorStateFile(), logger)
 }
 
+//ResetAllWithDel removes address book files plus all data, and resets the privValdiator data
+//include delegated validator files
+func ResetAllWithDel(dbDir, addrBookFile, privValKeyFile, privValStateFile string, delPrivValKeyFiles []string, delValStateFiles []string, logger log.Logger) {
+	removeAddrBook(addrBookFile, logger)
+	if err := os.RemoveAll(dbDir); err == nil {
+		logger.Info("Removed all blockchain history", "dir", dbDir)
+	} else {
+		logger.Error("Error removing all blockchain history", "dir", dbDir, "err", err)
+	}
+	// recreate the dbDir since the privVal state needs to live there
+	cmn.EnsureDir(dbDir, 0700)
+	resetFilePV(privValKeyFile, privValStateFile, logger)
+	for i := range delPrivValKeyFiles {
+		resetFilePV(delPrivValKeyFiles[i], delValStateFiles[i], logger)
+	}
+}
+
 // ResetAll removes address book files plus all data, and resets the privValdiator data.
 // Exported so other CLI tools can use it.
 func ResetAll(dbDir, addrBookFile, privValKeyFile, privValStateFile string, logger log.Logger) {

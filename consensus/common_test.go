@@ -258,6 +258,11 @@ func newConsensusStateWithConfig(thisConfig *cfg.Config, state sm.State, pv type
 	return newConsensusStateWithConfigAndBlockStore(thisConfig, state, pv, app, blockDB)
 }
 
+func newConsensusStateWithConfigByMultiVal(thisConfig *cfg.Config, state sm.State, pvs []types.PrivValidator, app abci.Application) *ConsensusState {
+	blockDB := dbm.NewMemDB()
+	return newConsensusStateWithConfigAndBlockStoreByMultiVal(thisConfig, state, pvs, app, blockDB)
+}
+
 func newConsensusStateWithConfigAndBlockStore(thisConfig *cfg.Config, state sm.State, pv types.PrivValidator, app abci.Application, blockDB dbm.DB) *ConsensusState {
 	// Get BlockStore
 	blockStore := bc.NewBlockStore(blockDB)
@@ -283,6 +288,43 @@ func newConsensusStateWithConfigAndBlockStore(thisConfig *cfg.Config, state sm.S
 	cs := NewConsensusState(thisConfig.Consensus, state, blockExec, blockStore, mempool, evpool)
 	cs.SetLogger(log.TestingLogger().With("module", "consensus"))
 	cs.SetPrivValidator(pv)
+
+	eventBus := types.NewEventBus()
+	eventBus.SetLogger(log.TestingLogger().With("module", "events"))
+	eventBus.Start()
+	cs.SetEventBus(eventBus)
+	return cs
+}
+
+func newConsensusStateWithConfigAndBlockStoreByMultiVal(thisConfig *cfg.Config, state sm.State, pvs []types.PrivValidator, app abci.Application, blockDB dbm.DB) *ConsensusState {
+	// Get BlockStore
+	blockStore := bc.NewBlockStore(blockDB)
+
+	// one for mempool, one for consensus
+	mtx := new(sync.Mutex)
+	proxyAppConnMem := abcicli.NewLocalClient(mtx, app)
+	proxyAppConnCon := abcicli.NewLocalClient(mtx, app)
+
+	// Make Mempool
+	mempool := mempl.NewMempool(thisConfig.Mempool, proxyAppConnMem, 0)
+	mempool.SetLogger(log.TestingLogger().With("module", "mempool"))
+	if thisConfig.Consensus.WaitForTxs() {
+		mempool.EnableTxsAvailable()
+	}
+
+	// mock the evidence pool
+	evpool := sm.MockEvidencePool{}
+
+	// Make ConsensusState
+	stateDB := dbm.NewMemDB()
+	blockExec := sm.NewBlockExecutor(stateDB, log.TestingLogger(), proxyAppConnCon, mempool, evpool)
+	cs := NewConsensusState(thisConfig.Consensus, state, blockExec, blockStore, mempool, evpool)
+	cs.SetLogger(log.TestingLogger().With("module", "consensus"))
+
+	cs.SetPrivValidator(pvs[0])
+	if len(pvs) > 1 {
+		cs.SetDelegatedPrivValidators(pvs[1:])
+	}
 
 	eventBus := types.NewEventBus()
 	eventBus.SetLogger(log.TestingLogger().With("module", "events"))
@@ -569,6 +611,49 @@ func randConsensusNet(nValidators int, testName string, tickerFunc func() Timeou
 		css[i].SetLogger(logger.With("validator", i, "module", "consensus"))
 	}
 	return css, func() {
+		for _, dir := range configRootDirs {
+			os.RemoveAll(dir)
+		}
+	}
+}
+
+func randConsensusNetMultiValMode(nValidators int, multiValidators int, testName string, tickerFunc func() TimeoutTicker,
+	appFunc func() abci.Application, configOpts ...func(*cfg.Config)) (int, []*ConsensusState, cleanupFunc) {
+	if multiValidators > nValidators {
+		return 0, nil, nil
+	}
+	genDoc, privVals := randGenesisDoc(nValidators, false, 30)
+
+	nodeCount := nValidators - multiValidators + 1
+	css := make([]*ConsensusState, nodeCount)
+	logger := consensusLogger()
+	configRootDirs := make([]string, 0, nodeCount)
+	for i := 0; i < nodeCount; i++ {
+		stateDB := dbm.NewMemDB() // each state needs its own db
+		state, _ := sm.LoadStateFromDBOrGenesisDoc(stateDB, genDoc)
+		thisConfig := ResetConfig(fmt.Sprintf("%s_%d", testName, i))
+		configRootDirs = append(configRootDirs, thisConfig.RootDir)
+		for _, opt := range configOpts {
+			opt(thisConfig)
+		}
+		ensureDir(filepath.Dir(thisConfig.Consensus.WalFile()), 0700) // dir for wal
+		app := appFunc()
+		vals := types.TM2PB.ValidatorUpdates(state.Validators)
+		app.InitChain(abci.RequestInitChain{Validators: vals})
+
+		if i == 0 {
+			vals := privVals[:multiValidators]
+			css[i] = newConsensusStateWithConfigByMultiVal(thisConfig, state, vals, app)
+			css[i].SetTimeoutTicker(tickerFunc())
+			css[i].SetLogger(logger.With("validator", i, "module", "consensus"))
+		} else {
+			privVal := privVals[multiValidators+i-1]
+			css[i] = newConsensusStateWithConfig(thisConfig, state, privVal, app)
+			css[i].SetTimeoutTicker(tickerFunc())
+			css[i].SetLogger(logger.With("validator", i, "module", "consensus"))
+		}
+	}
+	return nodeCount, css, func() {
 		for _, dir := range configRootDirs {
 			os.RemoveAll(dir)
 		}
