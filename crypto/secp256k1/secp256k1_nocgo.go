@@ -68,3 +68,29 @@ func serializeSig(sig *secp256k1.Signature) []byte {
 	copy(sigBytes[64-len(sBytes):64], sBytes)
 	return sigBytes
 }
+
+func (privKey PrivKeySecp256k1) SignRSV(msg []byte) ([]byte, error) {
+	priv, _ := secp256k1.PrivKeyFromBytes(secp256k1.S256(), privKey[:])
+	sig, err := secp256k1.SignCompact(secp256k1.S256(), priv, crypto.Sha256(msg), true)
+	if err != nil {
+		return nil, err
+	}
+	v := sig[0] - 27
+	copy(sig, sig[1:])
+	sig[64] = v
+	return sig, nil
+}
+
+func (privKey PrivKeySecp256k1) RecoverRSV(msg []byte, sig []byte) (crypto.PubKey, error) {
+	btcSig := make([]byte, 65)
+	btcSig[0] = sig[64] + 27
+	copy(btcSig[1:], sig)
+	var pubKeyBytes PubKeySecp256k1
+	pubKeyObj, _, err := secp256k1.RecoverCompact(secp256k1.S256(), btcSig, crypto.Sha256(msg))
+	if err != nil {
+		return pubKeyBytes, err
+	}
+
+	copy(pubKeyBytes[:], pubKeyObj.SerializeCompressed())
+	return pubKeyBytes, nil
+}

@@ -33,6 +33,11 @@ type PrivKey interface {
 	Equals(PrivKey) bool
 }
 
+type RSV interface {
+	SignRSV([]byte) ([]byte, error)
+	RecoverRSV([]byte, []byte) (PubKey, error)
+}
+
 type Symmetric interface {
 	Keygen() []byte
 	Encrypt(plaintext []byte, secret []byte) (ciphertext []byte)
