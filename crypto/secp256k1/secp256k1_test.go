@@ -1,6 +1,7 @@
 package secp256k1_test
 
 import (
+	"bytes"
 	"encoding/hex"
 	"math/big"
 	"testing"
@@ -110,3 +111,35 @@ func TestGenPrivKeySecp256k1(t *testing.T) {
 		})
 	}
 }
+
+
+func TestSignAndRecover(t *testing.T) {
+	privKey := secp256k1.GenPrivKey()
+	pubKey := privKey.PubKey()
+
+	msg := crypto.CRandBytes(128)
+	sig, err := privKey.SignRSV(msg)
+	require.Nil(t, err)
+
+	assert.True(t, pubKey.VerifyBytes(msg, sig))
+	rPubkey, err := privKey.RecoverRSV(msg, sig)
+	require.Nil(t, err)
+	assert.True(t, bytes.Compare(pubKey.Bytes(), rPubkey.Bytes()) == 0)
+}
+
+func TestSignModifyAndRecoverFailed(t *testing.T) {
+	privKey := secp256k1.GenPrivKey()
+	pubKey := privKey.PubKey()
+
+	msg := crypto.CRandBytes(256)
+	sig, err := privKey.SignRSV(msg)
+	require.Nil(t, err)
+
+	sig[3] ^= byte(0x01)
+	sig[4] ^= byte(0x11)
+
+	assert.False(t, pubKey.VerifyBytes(msg, sig))
+	errPubKey, _ := privKey.RecoverRSV(msg, sig)
+	assert.False(t, bytes.Compare(pubKey.Bytes(), errPubKey.Bytes()) == 0)
+}
+
